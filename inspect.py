@@ -30,8 +30,10 @@ class delayed_call:
     def run(self):
         if self.parent:
             self.parent.run()
-        return self.fn(*self.args, **self.kwargs)
-
+        try:
+            return self.fn(*self.args, **self.kwargs)
+        except:
+            pass
 
 class lazy:
     def __getattr__(self, name):
@@ -42,6 +44,127 @@ class lazy:
 
 
 L = lazy()
+
+
+def inspect_linear2(layer: torch.nn.Linear, input: torch.Tensor, name: str = "Linear"):
+    weight = layer.weight
+    bias = layer.bias
+
+    input_norm = input.pow(2).sum(dim=2).sqrt()
+    weight_norm = weight.pow(2).sum(dim=1).sqrt()
+
+    print(weight.shape, weight.norm(dim=1).shape, weight.norm(dim=0).shape)
+    print(input.shape, input.norm(dim=2).shape, input.norm(dim=1).shape)
+
+    # calculate the activation, power and rho
+    act = torch.matmul(input, weight.T)
+    power = torch.matmul(input_norm.T, weight_norm.unsqueeze(dim=0))
+    rho = act.squeeze(dim=0) / power
+
+    qweight = weight.to(torch.float8_e4m3fnuz).to(torch.float32)
+    qinput = input.to(torch.float8_e4m3fnuz).to(torch.float32)
+
+    qinput_norm = qinput.pow(2).sum(dim=2).sqrt()
+    qweight_norm = qweight.pow(2).sum(dim=1).sqrt()
+
+    qact = torch.matmul(qinput, qweight.T)
+    qpower = torch.matmul(qinput_norm.T, qweight_norm.unsqueeze(dim=0))
+    qrho = qact.squeeze(dim=0) / qpower
+
+    # calculate the singular values of input, weight and activation
+    ieig = torch.linalg.svdvals(input.squeeze(dim=0))
+    weig = torch.linalg.svdvals(weight)
+    qieig = torch.linalg.svdvals(qinput.squeeze(dim=0))
+    qweig = torch.linalg.svdvals(qweight)
+
+    plots = [
+        [
+            L.hist(input.flatten().cpu(), bins=100).title("i/ hist"),
+            L.hist(input_norm.flatten().cpu(), bins=100).title("i/ token norm hist"),
+            L.hist(input.pow(2).sum(dim=1).sqrt().flatten().cpu(), bins=100).title(
+                "i/ channel norm hist"
+            ),
+            L.hist(ieig.cpu(), bins=100).title("i/ eigs hist"),
+        ],
+        [
+            L.hist(weight.flatten().cpu(), bins=100).title("w/ hist"),
+            L.hist(weight_norm.flatten().cpu(), bins=100).title("w/ token norm hist."),
+            L.hist(weight.pow(2).sum(dim=0).sqrt().flatten().cpu(), bins=100).title(
+                "w/ channel norm hist."
+            ),
+        ],
+        [
+            L.hist(qinput.flatten().cpu(), bins=100).title("qi/ hist"),
+            L.hist(qinput_norm.flatten().cpu(), bins=100).title("qi/ token norm hist"),
+            L.hist(qinput.pow(2).sum(dim=1).sqrt().flatten().cpu(), bins=100).title(
+                "qi/ channel norm hist"
+            ),
+            L.hist(qieig.cpu(), bins=100).title("qi/ eigs hist"),
+        ],
+        [
+            L.hist(qweight.flatten().cpu(), bins=100).title("qw/ hist"),
+            L.hist(qweight_norm.flatten().cpu(), bins=100).title("qw/ token norm hist."),
+            L.hist(qweight.pow(2).sum(dim=0).sqrt().flatten().cpu(), bins=100).title(
+                "qw/ channel norm hist."
+            ),
+        ],
+        [
+            L.hist(act.flatten().cpu(), bins=100).title("act hist"),
+            L.hist(power.flatten().cpu(), bins=100).title("power hist"),
+            L.hist(rho.flatten().cpu(), bins=100).title("rho hist"),
+            L.scatter(rho.flatten().cpu(), power.flatten().cpu(), 1)
+            .xlabel("rho")
+            .ylabel("power")
+            .title("power vs rho"),
+            L.scatter(rho.flatten().cpu(), act.flatten().cpu(), 1)
+            .xlabel("rho")
+            .ylabel("act")
+            .title("act vs rho"),
+            L.hist(weig.cpu(), bins=100).title("w/ eigs hist"),
+        ],
+        [
+            L.hist(qact.flatten().cpu(), bins=100).title("qact hist"),
+            L.hist(qpower.flatten().cpu(), bins=100).title("qpower hist"),
+            L.hist(qrho.flatten().cpu(), bins=100).title("qrho hist"),
+            L.scatter(qrho.flatten().cpu(), qpower.flatten().cpu(), 1)
+            .xlabel("qrho")
+            .ylabel("qpower")
+            .title("qpower vs qrho"),
+            L.scatter(qrho.flatten().cpu(), qact.flatten().cpu(), 1)
+            .xlabel("qrho")
+            .ylabel("qact")
+            .title("qact vs qrho"),
+            L.hist(qweig.cpu(), bins=100).title("qw/ eigs hist"),
+        ],
+        [
+            L.hist((qact-act).flatten().cpu(), bins=100).title("act diff hist"),
+            L.hist((qpower-power).flatten().cpu(), bins=100).title("power diff hist"),
+            L.hist((qrho-rho).flatten().cpu(), bins=100).title("rho diff hist"),
+            L.scatter((qpower-power).flatten().cpu(), (qact-act).flatten().cpu(), 1)
+            .xlabel("qpower diff")
+            .ylabel("qact diff")
+            .title("qact diff vs qpower diff"),
+            L.scatter((qrho-rho).flatten().cpu(), (qact-act).flatten().cpu(), 1)
+            .xlabel("qrho diff")
+            .ylabel("qact diff")
+            .title("qact diff vs qrho diff"),
+            L.hist((qweig-weig).cpu(), bins=100).title("qw/ eigs diff hist"),
+        ],
+    ]
+
+    rows = len(plots)
+    cols = max(len(p) for p in plots)
+
+    fig = plt.figure(figsize=(cols * 3, rows * 2))
+    for i, row in enumerate(plots):
+        for j, plot in enumerate(row):
+            kwargs = {"projection": "polar"} if plot.polar else {}
+            plt.subplot(rows, cols, i * cols + j + 1, **kwargs)
+            plot.run()
+
+    fig.suptitle(f"Inspecting {name}")
+    plt.tight_layout()
+    plt.show()
 
 
 def inspect_linear(layer: torch.nn.Linear, input: torch.Tensor, name: str = "Linear"):
@@ -71,7 +194,7 @@ def inspect_linear(layer: torch.nn.Linear, input: torch.Tensor, name: str = "Lin
     weight_norms = torch.norm(weight_2d, dim=1)
 
     # make a fake weight and calculate the activation, power and rho
-    iweight = torch.normal(mean=0, std=0.02, size=weight.shape)
+    iweight = torch.normal(mean=0, std=0.02, size=weight.shape).cuda()
     iweight_norm = iweight.pow(2).sum(dim=1).sqrt()
     iweig = torch.linalg.svdvals(iweight)
 
